@@ -1,5 +1,6 @@
 # Build directory
 build/
+result
 main/build/
 
 # Config files
