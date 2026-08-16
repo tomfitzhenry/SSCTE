@@ -2,6 +2,9 @@
 CONFIG_TLS_ENABLE=y
 CONFIG_ESP_TLS_SERVER=y
 
+# IPv6 (SLAAC autoconfiguration of the STA interface)
+CONFIG_LWIP_IPV6_AUTOCONFIG=y
+
 # Use custom partition table
 CONFIG_PARTITION_TABLE_CUSTOM=y
 CONFIG_PARTITION_TABLE_CUSTOM_FILENAME="partitions.csv"

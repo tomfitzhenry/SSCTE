@@ -266,12 +266,16 @@ esp_err_t tcp_server_init(const tcp_server_tls_config_t *tls_config)
         ESP_LOGI(TAG, "Initializing TCP server for bridge %d on port %d",
                 i, bridge->tcp_port);
 
-        // Create listening socket
-        int sock = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
+        // Create dual-stack listening socket (IPv6, accepting IPv4 clients too)
+        int sock = socket(AF_INET6, SOCK_STREAM, IPPROTO_TCP);
         if (sock < 0) {
             ESP_LOGE(TAG, "socket(): errno %d", errno);
             goto err;
         }
+
+        // Allow IPv4 clients on the IPv6 socket
+        int v6only = 0;
+        setsockopt(sock, IPPROTO_IPV6, IPV6_V6ONLY, &v6only, sizeof(v6only));
 
         // Allow reuse of local address
         int opt = 1;
@@ -283,10 +287,10 @@ esp_err_t tcp_server_init(const tcp_server_tls_config_t *tls_config)
         setsockopt(sock, SOL_SOCKET, SO_SNDTIMEO, &t, sizeof(t));
 
         // Bind to all interfaces on the configured port
-        struct sockaddr_in addr = {
-            .sin_family      = AF_INET,
-            .sin_port        = htons(bridge->tcp_port),
-            .sin_addr.s_addr = htonl(INADDR_ANY),
+        struct sockaddr_in6 addr = {
+            .sin6_family = AF_INET6,
+            .sin6_port   = htons(bridge->tcp_port),
+            .sin6_addr   = IN6ADDR_ANY_INIT,
         };
         if (bind(sock, (struct sockaddr*)&addr, sizeof(addr)) < 0) {
             ESP_LOGE(TAG, "bind(): errno %d", errno);
@@ -351,7 +355,7 @@ static bool tcp_handle_new_connection(uart_bridge_t *bridge)
     }
 
     // Accept connection
-    struct sockaddr_in caddr;
+    struct sockaddr_storage caddr;
     socklen_t len = sizeof(caddr);
     int csock = accept(bridge->server_sock, (struct sockaddr*)&caddr, &len);
     if (csock < 0) {
@@ -359,11 +363,20 @@ static bool tcp_handle_new_connection(uart_bridge_t *bridge)
         return false;
     }
 
-    // Log client IP
-    char client_ip[16];
-    inet_ntoa_r(caddr.sin_addr, client_ip, sizeof(client_ip));
+    // Log client IP (IPv4 or IPv6)
+    char client_ip[INET6_ADDRSTRLEN];
+    uint16_t client_port;
+    if (caddr.ss_family == AF_INET6) {
+        struct sockaddr_in6 *c6 = (struct sockaddr_in6*)&caddr;
+        inet6_ntoa_r(c6->sin6_addr, client_ip, sizeof(client_ip));
+        client_port = ntohs(c6->sin6_port);
+    } else {
+        struct sockaddr_in *c4 = (struct sockaddr_in*)&caddr;
+        inet_ntoa_r(c4->sin_addr, client_ip, sizeof(client_ip));
+        client_port = ntohs(c4->sin_port);
+    }
     ESP_LOGI(TAG, "Client connected to UART%d (port %d) from %s:%u",
-             bridge->uart_port, bridge->tcp_port, client_ip, ntohs(caddr.sin_port));
+             bridge->uart_port, bridge->tcp_port, client_ip, client_port);
 
     // Disable Nagle algorithm to reduce latency
     int flag = 1;

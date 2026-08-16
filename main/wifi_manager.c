@@ -2,6 +2,8 @@
 #include "esp_wifi.h"
 #include "esp_event.h"
 #include "esp_log.h"
+#include "esp_netif_ip_addr.h"
+#include "esp_netif_defaults.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "freertos/event_groups.h"
@@ -11,6 +13,7 @@
 static const char *TAG = "WiFiManager";
 static bool wifi_connected = false;
 static TaskHandle_t reconnect_task_handle = NULL;
+static esp_netif_t *s_sta_netif = NULL;
 
 // Forward declarations for internal functions
 static void wifi_event_handler(void* arg, esp_event_base_t event_base,
@@ -26,6 +29,18 @@ static void wifi_event_handler(void* arg, esp_event_base_t event_base,
         if (event_id == WIFI_EVENT_STA_START) {
             ESP_LOGI(TAG, "WiFi started, connecting to AP");
             esp_wifi_connect();
+        } else if (event_id == WIFI_EVENT_STA_CONNECTED) {
+            // lwIP does not create the IPv6 link-local address on its own for
+            // WiFi interfaces; it must be created explicitly. Once it becomes
+            // valid, lwIP sends router solicitations, which drive SLAAC of
+            // the global address.
+            if (s_sta_netif != NULL) {
+                esp_err_t ret = esp_netif_create_ip6_linklocal(s_sta_netif);
+                if (ret != ESP_OK) {
+                    ESP_LOGW(TAG, "Failed to create IPv6 link-local address: %s",
+                             esp_err_to_name(ret));
+                }
+            }
         } else if (event_id == WIFI_EVENT_STA_DISCONNECTED) {
             if (wifi_connected) {
                 wifi_connected = false;
@@ -41,6 +56,11 @@ static void wifi_event_handler(void* arg, esp_event_base_t event_base,
         if (event != NULL) {
             ESP_LOGI(TAG, "Connected to WiFi, IP: " IPSTR, IP2STR(&event->ip_info.ip));
             wifi_connected = true;
+        }
+    } else if (event_base == IP_EVENT && event_id == IP_EVENT_GOT_IP6) {
+        ip_event_got_ip6_t* event = (ip_event_got_ip6_t*) event_data;
+        if (event != NULL) {
+            ESP_LOGI(TAG, "Got IPv6 address: " IPV6STR, IPV62STR(event->ip6_info.ip));
         }
     }
 }
@@ -92,7 +112,20 @@ esp_err_t wifi_init(void) {
         return ret;
     }
 
-    esp_netif_create_default_wifi_sta();
+    // Create the STA interface with IPv6 SLAAC enabled. The default WiFi STA
+    // netif lacks ESP_NETIF_FLAG_IPV6_AUTOCONFIG_ENABLED, and lwIP only runs
+    // IPv6 autoconfiguration when the interface asks for it.
+    esp_netif_inherent_config_t base_cfg = ESP_NETIF_INHERENT_DEFAULT_WIFI_STA();
+    base_cfg.flags |= ESP_NETIF_FLAG_IPV6_AUTOCONFIG_ENABLED;
+    esp_netif_config_t cfg = {
+        .base = &base_cfg,
+        .stack = ESP_NETIF_NETSTACK_DEFAULT_WIFI_STA,
+    };
+    s_sta_netif = esp_netif_new(&cfg);
+    if (s_sta_netif == NULL) {
+        ESP_LOGE(TAG, "Failed to create WiFi STA netif");
+        return ESP_FAIL;
+    }
 
     wifi_init_config_t wifi_config = WIFI_INIT_CONFIG_DEFAULT();
     ret = esp_wifi_init(&wifi_config);
@@ -112,6 +145,13 @@ esp_err_t wifi_init(void) {
         IP_EVENT, IP_EVENT_STA_GOT_IP, &wifi_event_handler, NULL, NULL);
     if (ret != ESP_OK) {
         ESP_LOGE(TAG, "Failed to register IP event handler");
+        return ret;
+    }
+
+    ret = esp_event_handler_instance_register(
+        IP_EVENT, IP_EVENT_GOT_IP6, &wifi_event_handler, NULL, NULL);
+    if (ret != ESP_OK) {
+        ESP_LOGE(TAG, "Failed to register IPv6 event handler");
         return ret;
     }
 
